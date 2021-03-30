@@ -1,8 +1,8 @@
 set(UNWINDSTACK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../)
 
-if (NOT TARGET lzma)
-    add_subdirectory(lzma)
-endif()
+#if (NOT TARGET lzma)
+#    add_subdirectory(lzma)
+#endif()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 include_directories(${UNWINDSTACK_ROOT} ${UNWINDSTACK_ROOT}/include ${UNWINDSTACK_ROOT}/lzma/C)
@@ -40,4 +40,4 @@ else()
 endif()
 
 add_library(unwindstack STATIC ${UNWINDSTACK_SOURCES})
-target_link_libraries(unwindstack lzma)
+# target_link_libraries(unwindstack lzma)

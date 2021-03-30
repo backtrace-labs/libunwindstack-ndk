@@ -22,9 +22,9 @@
 #include <string>
 #include <utility>
 
-#include <7zCrc.h>
-#include <Xz.h>
-#include <XzCrc64.h>
+// #include <7zCrc.h>
+// #include <Xz.h>
+// #include <XzCrc64.h>
 
 #include <unwindstack/DwarfError.h>
 #include <unwindstack/DwarfSection.h>
@@ -70,12 +70,13 @@ bool ElfInterface::IsValidPc(uint64_t pc) {
   return false;
 }
 
+#if 0
 Memory* ElfInterface::CreateGnuDebugdataMemory() {
   if (gnu_debugdata_offset_ == 0 || gnu_debugdata_size_ == 0) {
     return nullptr;
   }
 
-  // TODO: Only call these initialization functions once.
+  TODO: Only call these initialization functions once.
   CrcGenerateTable();
   Crc64GenerateTable();
 
@@ -123,6 +124,7 @@ Memory* ElfInterface::CreateGnuDebugdataMemory() {
 
   return dst.release();
 }
+#endif // 0
 
 template <typename AddressType>
 void ElfInterface::InitHeadersWithTemplate() {
