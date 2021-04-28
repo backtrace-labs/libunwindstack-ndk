@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include <linux/elf.h>
+#include <elf.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <signal.h>
@@ -35,7 +35,12 @@
 #include <unwindstack/Unwinder.h>
 
 static bool Attach(pid_t pid) {
-  if (ptrace(PTRACE_ATTACH, pid, 0, 0) == -1) {
+  if (ptrace(PTRACE_SEIZE, pid, 0, 0) == -1) {
+    return false;
+  }
+
+  if (ptrace(PTRACE_INTERRUPT, pid, 0, 0) == -1) {
+    ptrace(PTRACE_DETACH, pid, 0, 0);
     return false;
   }
 
@@ -52,12 +57,6 @@ static bool Attach(pid_t pid) {
 }
 
 void DoUnwind(pid_t pid) {
-  unwindstack::RemoteMaps remote_maps(pid);
-  if (!remote_maps.Parse()) {
-    printf("Failed to parse map data.\n");
-    return;
-  }
-
   unwindstack::Regs* regs = unwindstack::Regs::RemoteGet(pid);
   if (regs == nullptr) {
     printf("Unable to get remote reg data\n");
@@ -90,15 +89,8 @@ void DoUnwind(pid_t pid) {
   }
   printf("\n");
 
-  auto process_memory = unwindstack::Memory::CreateProcessMemory(pid);
-  unwindstack::Unwinder unwinder(128, &remote_maps, regs, process_memory);
-
-  unwindstack::JitDebug jit_debug(process_memory);
-  unwinder.SetJitDebug(&jit_debug, regs->Arch());
-
-  unwindstack::DexFiles dex_files(process_memory);
-  unwinder.SetDexFiles(&dex_files, regs->Arch());
-
+  unwindstack::UnwinderFromPid unwinder(1024, pid);
+  unwinder.SetRegs(regs);
   unwinder.Unwind();
 
   // Print the frames.

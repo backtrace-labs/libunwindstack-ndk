@@ -16,25 +16,47 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <unistd.h>
-#include "unistdfix.h"
-#include <sys/syscall.h>
+
+#include <7zCrc.h>
+#include <Xz.h>
+#include <XzCrc64.h>
 
 #include <algorithm>
 #include <memory>
+#include <mutex>
+#include <optional>
 
 #include <android-base/unique_fd.h>
 
+#include <unwindstack/Log.h>
 #include <unwindstack/Memory.h>
 
 #include "Check.h"
+#include "MemoryBuffer.h"
+#include "MemoryCache.h"
+#include "MemoryFileAtOffset.h"
+#include "MemoryLocal.h"
+#include "MemoryOffline.h"
+#include "MemoryOfflineBuffer.h"
+#include "MemoryRange.h"
+#include "MemoryRemote.h"
+#include "MemoryXz.h"
 
 namespace unwindstack {
+
+// Statistics (used only for optional debug log messages).
+static constexpr bool kLogMemoryXzUsage = false;
+std::atomic_size_t MemoryXz::total_used_ = 0;
+std::atomic_size_t MemoryXz::total_size_ = 0;
+std::atomic_size_t MemoryXz::total_open_ = 0;
 
 static size_t ProcessVmRead(pid_t pid, uint64_t remote_src, void* dst, size_t len) {
 
@@ -83,7 +105,7 @@ static size_t ProcessVmRead(pid_t pid, uint64_t remote_src, void* dst, size_t le
       ++iovecs_used;
     }
 
-    ssize_t rc = syscall(__NR_process_vm_readv, pid, &dst_iov, 1, src_iovs, iovecs_used, 0);
+    ssize_t rc = process_vm_readv(pid, &dst_iov, 1, src_iovs, iovecs_used, 0);
     if (rc == -1) {
       return total_read;
     }
@@ -151,22 +173,43 @@ bool Memory::ReadFully(uint64_t addr, void* dst, size_t size) {
   return rc == size;
 }
 
-bool Memory::ReadString(uint64_t addr, std::string* string, uint64_t max_read) {
-  string->clear();
-  uint64_t bytes_read = 0;
-  while (bytes_read < max_read) {
-    uint8_t value;
-    if (!ReadFully(addr, &value, sizeof(value))) {
-      return false;
+bool Memory::ReadString(uint64_t addr, std::string* dst, size_t max_read) {
+  char buffer[256];  // Large enough for 99% of symbol names.
+  size_t size = 0;   // Number of bytes which were read into the buffer.
+  for (size_t offset = 0; offset < max_read; offset += size) {
+    // Look for null-terminator first, so we can allocate string of exact size.
+    // If we know the end of valid memory range, do the reads in larger blocks.
+    size_t read = std::min(sizeof(buffer), max_read - offset);
+    size = Read(addr + offset, buffer, read);
+    if (size == 0) {
+      return false;  // We have not found end of string yet and we can not read more data.
     }
-    if (value == '\0') {
-      return true;
+    size_t length = strnlen(buffer, size);  // Index of the null-terminator.
+    if (length < size) {
+      // We found the null-terminator. Allocate the string and set its content.
+      if (offset == 0) {
+        // We did just single read, so the buffer already contains the whole string.
+        dst->assign(buffer, length);
+        return true;
+      } else {
+        // The buffer contains only the last block. Read the whole string again.
+        dst->assign(offset + length, '\0');
+        return ReadFully(addr, dst->data(), dst->size());
+      }
     }
-    string->push_back(value);
-    addr++;
-    bytes_read++;
   }
   return false;
+}
+
+std::unique_ptr<Memory> Memory::CreateFileMemory(const std::string& path, uint64_t offset,
+                                                 uint64_t size) {
+  auto memory = std::make_unique<MemoryFileAtOffset>();
+
+  if (memory->Init(path, offset, size)) {
+    return memory;
+  }
+
+  return nullptr;
 }
 
 std::shared_ptr<Memory> Memory::CreateProcessMemory(pid_t pid) {
@@ -176,13 +219,32 @@ std::shared_ptr<Memory> Memory::CreateProcessMemory(pid_t pid) {
   return std::shared_ptr<Memory>(new MemoryRemote(pid));
 }
 
+std::shared_ptr<Memory> Memory::CreateProcessMemoryCached(pid_t pid) {
+  if (pid == getpid()) {
+    return std::shared_ptr<Memory>(new MemoryCache(new MemoryLocal()));
+  }
+  return std::shared_ptr<Memory>(new MemoryCache(new MemoryRemote(pid)));
+}
+
+std::shared_ptr<Memory> Memory::CreateProcessMemoryThreadCached(pid_t pid) {
+  if (pid == getpid()) {
+    return std::shared_ptr<Memory>(new MemoryThreadCache(new MemoryLocal()));
+  }
+  return std::shared_ptr<Memory>(new MemoryThreadCache(new MemoryRemote(pid)));
+}
+
+std::shared_ptr<Memory> Memory::CreateOfflineMemory(const uint8_t* data, uint64_t start,
+                                                    uint64_t end) {
+  return std::shared_ptr<Memory>(new MemoryOfflineBuffer(data, start, end));
+}
+
 size_t MemoryBuffer::Read(uint64_t addr, void* dst, size_t size) {
-  if (addr >= raw_.size()) {
+  if (addr >= size_) {
     return 0;
   }
 
-  size_t bytes_left = raw_.size() - static_cast<size_t>(addr);
-  const unsigned char* actual_base = static_cast<const unsigned char*>(raw_.data()) + addr;
+  size_t bytes_left = size_ - static_cast<size_t>(addr);
+  const unsigned char* actual_base = static_cast<const unsigned char*>(raw_) + addr;
   size_t actual_len = std::min(bytes_left, size);
 
   memcpy(dst, actual_base, actual_len);
@@ -190,7 +252,7 @@ size_t MemoryBuffer::Read(uint64_t addr, void* dst, size_t size) {
 }
 
 uint8_t* MemoryBuffer::GetPtr(size_t offset) {
-  if (offset < raw_.size()) {
+  if (offset < size_) {
     return &raw_[offset];
   }
   return nullptr;
@@ -292,13 +354,7 @@ size_t MemoryRemote::Read(uint64_t addr, void* dst, size_t size) {
 }
 
 size_t MemoryLocal::Read(uint64_t addr, void* dst, size_t size) {
-  // Prefer process_vm_read, try it first. If it doesn't work, use direct memory read.
-  size_t result = ProcessVmRead(getpid(), addr, dst, size);
-  if (!result && size) {
-    memcpy(dst, (void *)addr, size);
-    result = size;
-  }
-  return result;
+  return ProcessVmRead(getpid(), addr, dst, size);
 }
 
 MemoryRange::MemoryRange(const std::shared_ptr<Memory>& memory, uint64_t begin, uint64_t length,
@@ -324,6 +380,26 @@ size_t MemoryRange::Read(uint64_t addr, void* dst, size_t size) {
   return memory_->Read(read_addr, dst, read_length);
 }
 
+void MemoryRanges::Insert(MemoryRange* memory) {
+  uint64_t last_addr;
+  if (__builtin_add_overflow(memory->offset(), memory->length(), &last_addr)) {
+    // This should never happen in the real world. However, it is possible
+    // that an offset in a mapped in segment could be crafted such that
+    // this value overflows. In that case, clamp the value to the max uint64
+    // value.
+    last_addr = UINT64_MAX;
+  }
+  maps_.emplace(last_addr, memory);
+}
+
+size_t MemoryRanges::Read(uint64_t addr, void* dst, size_t size) {
+  auto entry = maps_.upper_bound(addr);
+  if (entry != maps_.end()) {
+    return entry->second->Read(addr, dst, size);
+  }
+  return 0;
+}
+
 bool MemoryOffline::Init(const std::string& file, uint64_t offset) {
   auto memory_file = std::make_shared<MemoryFileAtOffset>();
   if (!memory_file->Init(file, offset)) {
@@ -341,7 +417,7 @@ bool MemoryOffline::Init(const std::string& file, uint64_t offset) {
     return false;
   }
 
-  memory_.reset(new MemoryRange(memory_file, sizeof(start), size, start));
+  memory_ = std::make_unique<MemoryRange>(memory_file, sizeof(start), size, start);
   return true;
 }
 
@@ -351,6 +427,25 @@ size_t MemoryOffline::Read(uint64_t addr, void* dst, size_t size) {
   }
 
   return memory_->Read(addr, dst, size);
+}
+
+MemoryOfflineBuffer::MemoryOfflineBuffer(const uint8_t* data, uint64_t start, uint64_t end)
+    : data_(data), start_(start), end_(end) {}
+
+void MemoryOfflineBuffer::Reset(const uint8_t* data, uint64_t start, uint64_t end) {
+  data_ = data;
+  start_ = start;
+  end_ = end;
+}
+
+size_t MemoryOfflineBuffer::Read(uint64_t addr, void* dst, size_t size) {
+  if (addr < start_ || addr >= end_) {
+    return 0;
+  }
+
+  size_t read_length = std::min(size, static_cast<size_t>(end_ - addr));
+  memcpy(dst, &data_[addr - start_], read_length);
+  return read_length;
 }
 
 MemoryOfflineParts::~MemoryOfflineParts() {
@@ -373,6 +468,327 @@ size_t MemoryOfflineParts::Read(uint64_t addr, void* dst, size_t size) {
     }
   }
   return 0;
+}
+
+size_t MemoryCacheBase::InternalCachedRead(uint64_t addr, void* dst, size_t size,
+                                           CacheDataType* cache) {
+  uint64_t addr_page = addr >> kCacheBits;
+  auto entry = cache->find(addr_page);
+  uint8_t* cache_dst;
+  if (entry != cache->end()) {
+    cache_dst = entry->second;
+  } else {
+    cache_dst = (*cache)[addr_page];
+    if (!impl_->ReadFully(addr_page << kCacheBits, cache_dst, kCacheSize)) {
+      // Erase the entry.
+      cache->erase(addr_page);
+      return impl_->Read(addr, dst, size);
+    }
+  }
+  size_t max_read = ((addr_page + 1) << kCacheBits) - addr;
+  if (size <= max_read) {
+    memcpy(dst, &cache_dst[addr & kCacheMask], size);
+    return size;
+  }
+
+  // The read crossed into another cached entry, since a read can only cross
+  // into one extra cached page, duplicate the code rather than looping.
+  memcpy(dst, &cache_dst[addr & kCacheMask], max_read);
+  dst = &reinterpret_cast<uint8_t*>(dst)[max_read];
+  addr_page++;
+
+  entry = cache->find(addr_page);
+  if (entry != cache->end()) {
+    cache_dst = entry->second;
+  } else {
+    cache_dst = (*cache)[addr_page];
+    if (!impl_->ReadFully(addr_page << kCacheBits, cache_dst, kCacheSize)) {
+      // Erase the entry.
+      cache->erase(addr_page);
+      return impl_->Read(addr_page << kCacheBits, dst, size - max_read) + max_read;
+    }
+  }
+  memcpy(dst, cache_dst, size - max_read);
+  return size;
+}
+
+void MemoryCache::Clear() {
+  std::lock_guard<std::mutex> lock(cache_lock_);
+  cache_.clear();
+}
+
+size_t MemoryCache::CachedRead(uint64_t addr, void* dst, size_t size) {
+  // Use a single lock since this object is not designed to be performant
+  // for multiple object reading from multiple threads.
+  std::lock_guard<std::mutex> lock(cache_lock_);
+
+  return InternalCachedRead(addr, dst, size, &cache_);
+}
+
+MemoryThreadCache::MemoryThreadCache(Memory* memory) : MemoryCacheBase(memory) {
+  thread_cache_ = std::make_optional<pthread_t>();
+  if (pthread_key_create(&*thread_cache_, [](void* memory) {
+        CacheDataType* cache = reinterpret_cast<CacheDataType*>(memory);
+        delete cache;
+      }) != 0) {
+    log_async_safe("Failed to create pthread key.");
+    thread_cache_.reset();
+  }
+}
+
+MemoryThreadCache::~MemoryThreadCache() {
+  if (thread_cache_) {
+    CacheDataType* cache = reinterpret_cast<CacheDataType*>(pthread_getspecific(*thread_cache_));
+    delete cache;
+    pthread_key_delete(*thread_cache_);
+  }
+}
+
+size_t MemoryThreadCache::CachedRead(uint64_t addr, void* dst, size_t size) {
+  if (!thread_cache_) {
+    return impl_->Read(addr, dst, size);
+  }
+
+  CacheDataType* cache = reinterpret_cast<CacheDataType*>(pthread_getspecific(*thread_cache_));
+  if (cache == nullptr) {
+    cache = new CacheDataType;
+    pthread_setspecific(*thread_cache_, cache);
+  }
+
+  return InternalCachedRead(addr, dst, size, cache);
+}
+
+void MemoryThreadCache::Clear() {
+  CacheDataType* cache = reinterpret_cast<CacheDataType*>(pthread_getspecific(*thread_cache_));
+  if (cache != nullptr) {
+    delete cache;
+    pthread_setspecific(*thread_cache_, nullptr);
+  }
+}
+
+MemoryXz::MemoryXz(Memory* memory, uint64_t addr, uint64_t size, const std::string& name)
+    : compressed_memory_(memory), compressed_addr_(addr), compressed_size_(size), name_(name) {
+  total_open_ += 1;
+}
+
+bool MemoryXz::Init() {
+  static std::once_flag crc_initialized;
+  std::call_once(crc_initialized, []() {
+    CrcGenerateTable();
+    Crc64GenerateTable();
+  });
+  if (compressed_size_ >= kMaxCompressedSize) {
+    return false;
+  }
+  if (!ReadBlocks()) {
+    return false;
+  }
+
+  // All blocks (except the last one) must have the same power-of-2 size.
+  if (blocks_.size() > 1) {
+    size_t block_size_log2 = __builtin_ctz(blocks_.front().decompressed_size);
+    auto correct_size = [=](XzBlock& b) { return b.decompressed_size == (1 << block_size_log2); };
+    if (std::all_of(blocks_.begin(), std::prev(blocks_.end()), correct_size) &&
+        blocks_.back().decompressed_size <= (1 << block_size_log2)) {
+      block_size_log2_ = block_size_log2;
+    } else {
+      // Inconsistent block-sizes.  Decompress and merge everything now.
+      std::unique_ptr<uint8_t[]> data(new uint8_t[size_]);
+      size_t offset = 0;
+      for (XzBlock& block : blocks_) {
+        if (!Decompress(&block)) {
+          return false;
+        }
+        memcpy(data.get() + offset, block.decompressed_data.get(), block.decompressed_size);
+        offset += block.decompressed_size;
+      }
+      blocks_.clear();
+      blocks_.push_back(XzBlock{
+          .decompressed_data = std::move(data),
+          .decompressed_size = size_,
+      });
+      block_size_log2_ = 31;  // Because 32 bits is too big (shift right by 32 is not allowed).
+    }
+  }
+
+  return true;
+}
+
+MemoryXz::~MemoryXz() {
+  total_used_ -= used_;
+  total_size_ -= size_;
+  total_open_ -= 1;
+}
+
+size_t MemoryXz::Read(uint64_t addr, void* buffer, size_t size) {
+  if (addr >= size_) {
+    return 0;  // Read past the end.
+  }
+  uint8_t* dst = reinterpret_cast<uint8_t*>(buffer);  // Position in the output buffer.
+  for (size_t i = addr >> block_size_log2_; i < blocks_.size(); i++) {
+    XzBlock* block = &blocks_[i];
+    if (block->decompressed_data == nullptr) {
+      if (!Decompress(block)) {
+        break;
+      }
+    }
+    size_t offset = (addr - (i << block_size_log2_));  // Start inside the block.
+    size_t copy_bytes = std::min<size_t>(size, block->decompressed_size - offset);
+    memcpy(dst, block->decompressed_data.get() + offset, copy_bytes);
+    dst += copy_bytes;
+    addr += copy_bytes;
+    size -= copy_bytes;
+    if (size == 0) {
+      break;
+    }
+  }
+  return dst - reinterpret_cast<uint8_t*>(buffer);
+}
+
+bool MemoryXz::ReadBlocks() {
+  static ISzAlloc alloc;
+  alloc.Alloc = [](ISzAllocPtr, size_t size) { return malloc(size); };
+  alloc.Free = [](ISzAllocPtr, void* ptr) { return free(ptr); };
+
+  // Read the compressed data, so we can quickly scan through the headers.
+  std::unique_ptr<uint8_t[]> compressed_data(new (std::nothrow) uint8_t[compressed_size_]);
+  if (compressed_data.get() == nullptr) {
+    return false;
+  }
+  if (!compressed_memory_->ReadFully(compressed_addr_, compressed_data.get(), compressed_size_)) {
+    return false;
+  }
+
+  // Implement the required interface for communication
+  // (written in C so we can not use virtual methods or member functions).
+  struct XzLookInStream : public ILookInStream, public ICompressProgress {
+    static SRes LookImpl(const ILookInStream* p, const void** buf, size_t* size) {
+      auto* ctx = reinterpret_cast<const XzLookInStream*>(p);
+      *buf = ctx->data + ctx->offset;
+      *size = std::min(*size, ctx->size - ctx->offset);
+      return SZ_OK;
+    }
+    static SRes SkipImpl(const ILookInStream* p, size_t len) {
+      auto* ctx = reinterpret_cast<XzLookInStream*>(const_cast<ILookInStream*>(p));
+      ctx->offset += len;
+      return SZ_OK;
+    }
+    static SRes ReadImpl(const ILookInStream* p, void* buf, size_t* size) {
+      auto* ctx = reinterpret_cast<const XzLookInStream*>(p);
+      *size = std::min(*size, ctx->size - ctx->offset);
+      memcpy(buf, ctx->data + ctx->offset, *size);
+      return SZ_OK;
+    }
+    static SRes SeekImpl(const ILookInStream* p, Int64* pos, ESzSeek origin) {
+      auto* ctx = reinterpret_cast<XzLookInStream*>(const_cast<ILookInStream*>(p));
+      switch (origin) {
+        case SZ_SEEK_SET:
+          ctx->offset = *pos;
+          break;
+        case SZ_SEEK_CUR:
+          ctx->offset += *pos;
+          break;
+        case SZ_SEEK_END:
+          ctx->offset = ctx->size + *pos;
+          break;
+      }
+      *pos = ctx->offset;
+      return SZ_OK;
+    }
+    static SRes ProgressImpl(const ICompressProgress*, UInt64, UInt64) { return SZ_OK; }
+    size_t offset;
+    uint8_t* data;
+    size_t size;
+  };
+  XzLookInStream callbacks;
+  callbacks.Look = &XzLookInStream::LookImpl;
+  callbacks.Skip = &XzLookInStream::SkipImpl;
+  callbacks.Read = &XzLookInStream::ReadImpl;
+  callbacks.Seek = &XzLookInStream::SeekImpl;
+  callbacks.Progress = &XzLookInStream::ProgressImpl;
+  callbacks.offset = 0;
+  callbacks.data = compressed_data.get();
+  callbacks.size = compressed_size_;
+
+  // Iterate over the internal XZ blocks without decompressing them.
+  CXzs xzs;
+  Xzs_Construct(&xzs);
+  Int64 end_offset = compressed_size_;
+  if (Xzs_ReadBackward(&xzs, &callbacks, &end_offset, &callbacks, &alloc) == SZ_OK) {
+    blocks_.reserve(Xzs_GetNumBlocks(&xzs));
+    size_t dst_offset = 0;
+    for (int s = xzs.num - 1; s >= 0; s--) {
+      const CXzStream& stream = xzs.streams[s];
+      size_t src_offset = stream.startOffset + XZ_STREAM_HEADER_SIZE;
+      for (size_t b = 0; b < stream.numBlocks; b++) {
+        const CXzBlockSizes& block = stream.blocks[b];
+        blocks_.push_back(XzBlock{
+            .decompressed_data = nullptr,  // Lazy allocation and decompression.
+            .decompressed_size = static_cast<uint32_t>(block.unpackSize),
+            .compressed_offset = static_cast<uint32_t>(src_offset),
+            .compressed_size = static_cast<uint32_t>((block.totalSize + 3) & ~3u),
+            .stream_flags = stream.flags,
+        });
+        dst_offset += blocks_.back().decompressed_size;
+        src_offset += blocks_.back().compressed_size;
+      }
+    }
+    size_ = dst_offset;
+    total_size_ += dst_offset;
+  }
+  Xzs_Free(&xzs, &alloc);
+  return !blocks_.empty();
+}
+
+bool MemoryXz::Decompress(XzBlock* block) {
+  static ISzAlloc alloc;
+  alloc.Alloc = [](ISzAllocPtr, size_t size) { return malloc(size); };
+  alloc.Free = [](ISzAllocPtr, void* ptr) { return free(ptr); };
+
+  // Read the compressed data for this block.
+  std::unique_ptr<uint8_t[]> compressed_data(new (std::nothrow) uint8_t[block->compressed_size]);
+  if (compressed_data.get() == nullptr) {
+    return false;
+  }
+  if (!compressed_memory_->ReadFully(compressed_addr_ + block->compressed_offset,
+                                     compressed_data.get(), block->compressed_size)) {
+    return false;
+  }
+
+  // Allocate decompressed memory.
+  std::unique_ptr<uint8_t[]> decompressed_data(new uint8_t[block->decompressed_size]);
+  if (decompressed_data == nullptr) {
+    return false;
+  }
+
+  // Decompress.
+  CXzUnpacker state{};
+  XzUnpacker_Construct(&state, &alloc);
+  state.streamFlags = block->stream_flags;
+  XzUnpacker_PrepareToRandomBlockDecoding(&state);
+  size_t decompressed_size = block->decompressed_size;
+  size_t compressed_size = block->compressed_size;
+  ECoderStatus status;
+  XzUnpacker_SetOutBuf(&state, decompressed_data.get(), decompressed_size);
+  int return_val =
+      XzUnpacker_Code(&state, /*decompressed_data=*/nullptr, &decompressed_size,
+                      compressed_data.get(), &compressed_size, true, CODER_FINISH_END, &status);
+  XzUnpacker_Free(&state);
+  if (return_val != SZ_OK || status != CODER_STATUS_FINISHED_WITH_MARK) {
+    log(0, "Can not decompress \"%s\"", name_.c_str());
+    return false;
+  }
+
+  used_ += block->decompressed_size;
+  total_used_ += block->decompressed_size;
+  if (kLogMemoryXzUsage) {
+    log(0, "decompressed memory: %zi%% of %ziKB (%zi files), %i%% of %iKB (%s)",
+        100 * total_used_ / total_size_, total_size_ / 1024, total_open_.load(),
+        100 * used_ / size_, size_ / 1024, name_.c_str());
+  }
+
+  block->decompressed_data = std::move(decompressed_data);
+  return true;
 }
 
 }  // namespace unwindstack

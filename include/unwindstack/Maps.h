@@ -17,9 +17,11 @@
 #ifndef _LIBUNWINDSTACK_MAPS_H
 #define _LIBUNWINDSTACK_MAPS_H
 
+#include <pthread.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -37,10 +39,18 @@ static constexpr int MAPS_FLAGS_JIT_SYMFILE_MAP = 0x4000;
 
 class Maps {
  public:
-  Maps() = default;
-  virtual ~Maps();
+  virtual ~Maps() = default;
 
-  MapInfo* Find(uint64_t pc);
+  Maps() = default;
+
+  // Maps are not copyable but movable, because they own pointers to MapInfo
+  // objects.
+  Maps(const Maps&) = delete;
+  Maps& operator=(const Maps&) = delete;
+  Maps(Maps&&) = default;
+  Maps& operator=(Maps&&) = default;
+
+  virtual MapInfo* Find(uint64_t pc);
 
   virtual bool Parse();
 
@@ -51,11 +61,11 @@ class Maps {
 
   void Sort();
 
-  typedef std::vector<MapInfo*>::iterator iterator;
+  typedef std::vector<std::unique_ptr<MapInfo>>::iterator iterator;
   iterator begin() { return maps_.begin(); }
   iterator end() { return maps_.end(); }
 
-  typedef std::vector<MapInfo*>::const_iterator const_iterator;
+  typedef std::vector<std::unique_ptr<MapInfo>>::const_iterator const_iterator;
   const_iterator begin() const { return maps_.begin(); }
   const_iterator end() const { return maps_.end(); }
 
@@ -63,11 +73,11 @@ class Maps {
 
   MapInfo* Get(size_t index) {
     if (index >= maps_.size()) return nullptr;
-    return maps_[index];
+    return maps_[index].get();
   }
 
  protected:
-  std::vector<MapInfo*> maps_;
+  std::vector<std::unique_ptr<MapInfo>> maps_;
 };
 
 class RemoteMaps : public Maps {
@@ -85,6 +95,25 @@ class LocalMaps : public RemoteMaps {
  public:
   LocalMaps() : RemoteMaps(getpid()) {}
   virtual ~LocalMaps() = default;
+};
+
+class LocalUpdatableMaps : public Maps {
+ public:
+  LocalUpdatableMaps();
+  virtual ~LocalUpdatableMaps() = default;
+
+  MapInfo* Find(uint64_t pc) override;
+
+  bool Parse() override;
+
+  const std::string GetMapsFile() const override;
+
+  bool Reparse();
+
+ protected:
+  std::vector<std::unique_ptr<MapInfo>> saved_maps_;
+
+  pthread_rwlock_t maps_rwlock_;
 };
 
 class BufferMaps : public Maps {

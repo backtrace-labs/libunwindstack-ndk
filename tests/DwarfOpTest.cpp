@@ -48,7 +48,7 @@ class DwarfOpTest : public ::testing::Test {
   std::unique_ptr<DwarfMemory> mem_;
   std::unique_ptr<DwarfOp<TypeParam>> op_;
 };
-TYPED_TEST_CASE_P(DwarfOpTest);
+TYPED_TEST_SUITE_P(DwarfOpTest);
 
 TYPED_TEST_P(DwarfOpTest, decode) {
   // Memory error.
@@ -599,16 +599,31 @@ TYPED_TEST_P(DwarfOpTest, op_over) {
 
 TYPED_TEST_P(DwarfOpTest, op_pick) {
   std::vector<uint8_t> opcode_buffer = {
+      // Choose a zero index with an empty stack.
+      0x15,
+      0x0,
       // Push a few values.
-      0x08, 0x1a, 0x08, 0xed, 0x08, 0x34,
+      0x08,
+      0x1a,
+      0x08,
+      0xed,
+      0x08,
+      0x34,
       // Copy the value at offset 2.
-      0x15, 0x01,
+      0x15,
+      0x01,
       // Copy the last value in the stack.
-      0x15, 0x03,
+      0x15,
+      0x03,
       // Choose an invalid index.
-      0x15, 0x10,
+      0x15,
+      0x10,
   };
   this->op_memory_.SetMemory(0, opcode_buffer);
+
+  ASSERT_FALSE(this->op_->Decode());
+  ASSERT_EQ(0x15, this->op_->cur_op());
+  ASSERT_EQ(DWARF_ERROR_STACK_INDEX_NOT_VALID, this->op_->LastErrorCode());
 
   ASSERT_TRUE(this->op_->Decode());
   ASSERT_EQ(1U, this->op_->StackSize());
@@ -1571,15 +1586,16 @@ TYPED_TEST_P(DwarfOpTest, is_dex_pc) {
   EXPECT_FALSE(this->op_->dex_pc_set());
 }
 
-REGISTER_TYPED_TEST_CASE_P(DwarfOpTest, decode, eval, illegal_opcode, not_implemented, op_addr,
-                           op_deref, op_deref_size, const_unsigned, const_signed, const_uleb,
-                           const_sleb, op_dup, op_drop, op_over, op_pick, op_swap, op_rot, op_abs,
-                           op_and, op_div, op_minus, op_mod, op_mul, op_neg, op_not, op_or, op_plus,
-                           op_plus_uconst, op_shl, op_shr, op_shra, op_xor, op_bra,
-                           compare_opcode_stack_error, compare_opcodes, op_skip, op_lit, op_reg,
-                           op_regx, op_breg, op_breg_invalid_register, op_bregx, op_nop, is_dex_pc);
+REGISTER_TYPED_TEST_SUITE_P(DwarfOpTest, decode, eval, illegal_opcode, not_implemented, op_addr,
+                            op_deref, op_deref_size, const_unsigned, const_signed, const_uleb,
+                            const_sleb, op_dup, op_drop, op_over, op_pick, op_swap, op_rot, op_abs,
+                            op_and, op_div, op_minus, op_mod, op_mul, op_neg, op_not, op_or,
+                            op_plus, op_plus_uconst, op_shl, op_shr, op_shra, op_xor, op_bra,
+                            compare_opcode_stack_error, compare_opcodes, op_skip, op_lit, op_reg,
+                            op_regx, op_breg, op_breg_invalid_register, op_bregx, op_nop,
+                            is_dex_pc);
 
 typedef ::testing::Types<uint32_t, uint64_t> DwarfOpTestTypes;
-INSTANTIATE_TYPED_TEST_CASE_P(, DwarfOpTest, DwarfOpTestTypes);
+INSTANTIATE_TYPED_TEST_SUITE_P(Libunwindstack, DwarfOpTest, DwarfOpTestTypes);
 
 }  // namespace unwindstack

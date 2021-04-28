@@ -31,6 +31,9 @@
 
 namespace unwindstack {
 
+// Forward declarations.
+enum ArchEnum : uint8_t;
+
 // DWARF Standard home: http://dwarfstd.org/
 // This code is based on DWARF 4: http://http://dwarfstd.org/doc/DWARF4.pdf
 // See section 6.4.2.1 for a description of the DW_CFA_xxx values.
@@ -49,7 +52,14 @@ class DwarfCfaInfo {
   };
 
   struct Info {
-    const char* name;
+    // It may seem cleaner to just change the type of 'name' to 'const char *'.
+    // However, having a pointer here would require relocation at runtime,
+    // causing 'kTable' to be placed in data.rel.ro section instead of rodata
+    // section, adding memory pressure to the system.  Note that this is only
+    // safe because this is only used in C++ code.  C++ standard, unlike C
+    // standard, mandates the array size to be large enough to hold the NULL
+    // terminator when initialized with a string literal.
+    const char name[36];
     uint8_t supported_version;
     uint8_t num_operands;
     uint8_t operands[2];
@@ -65,14 +75,14 @@ class DwarfCfa {
   typedef typename std::make_signed<AddressType>::type SignedType;
 
  public:
-  DwarfCfa(DwarfMemory* memory, const DwarfFde* fde) : memory_(memory), fde_(fde) {}
+  DwarfCfa(DwarfMemory* memory, const DwarfFde* fde, ArchEnum arch)
+      : memory_(memory), fde_(fde), arch_(arch) {}
   virtual ~DwarfCfa() = default;
 
   bool GetLocationInfo(uint64_t pc, uint64_t start_offset, uint64_t end_offset,
-                       dwarf_loc_regs_t* loc_regs);
+                       DwarfLocations* loc_regs);
 
-  bool Log(uint32_t indent, uint64_t pc, uint64_t load_bias, uint64_t start_offset,
-           uint64_t end_offset);
+  bool Log(uint32_t indent, uint64_t pc, uint64_t start_offset, uint64_t end_offset);
 
   const DwarfErrorData& last_error() { return last_error_; }
   DwarfErrorCode LastErrorCode() { return last_error_.code; }
@@ -80,7 +90,7 @@ class DwarfCfa {
 
   AddressType cur_pc() { return cur_pc_; }
 
-  void set_cie_loc_regs(const dwarf_loc_regs_t* cie_loc_regs) { cie_loc_regs_ = cie_loc_regs; }
+  void set_cie_loc_regs(const DwarfLocations* cie_loc_regs) { cie_loc_regs_ = cie_loc_regs; }
 
  protected:
   std::string GetOperandString(uint8_t operand, uint64_t value, uint64_t* cur_pc);
@@ -93,37 +103,39 @@ class DwarfCfa {
   DwarfErrorData last_error_;
   DwarfMemory* memory_;
   const DwarfFde* fde_;
+  ArchEnum arch_;
 
   AddressType cur_pc_;
-  const dwarf_loc_regs_t* cie_loc_regs_ = nullptr;
+  const DwarfLocations* cie_loc_regs_ = nullptr;
   std::vector<AddressType> operands_;
-  std::stack<dwarf_loc_regs_t> loc_reg_state_;
+  std::stack<DwarfLocations> loc_reg_state_;
 
   // CFA processing functions.
-  bool cfa_nop(dwarf_loc_regs_t*);
-  bool cfa_set_loc(dwarf_loc_regs_t*);
-  bool cfa_advance_loc(dwarf_loc_regs_t*);
-  bool cfa_offset(dwarf_loc_regs_t*);
-  bool cfa_restore(dwarf_loc_regs_t*);
-  bool cfa_undefined(dwarf_loc_regs_t*);
-  bool cfa_same_value(dwarf_loc_regs_t*);
-  bool cfa_register(dwarf_loc_regs_t*);
-  bool cfa_remember_state(dwarf_loc_regs_t*);
-  bool cfa_restore_state(dwarf_loc_regs_t*);
-  bool cfa_def_cfa(dwarf_loc_regs_t*);
-  bool cfa_def_cfa_register(dwarf_loc_regs_t*);
-  bool cfa_def_cfa_offset(dwarf_loc_regs_t*);
-  bool cfa_def_cfa_expression(dwarf_loc_regs_t*);
-  bool cfa_expression(dwarf_loc_regs_t*);
-  bool cfa_offset_extended_sf(dwarf_loc_regs_t*);
-  bool cfa_def_cfa_sf(dwarf_loc_regs_t*);
-  bool cfa_def_cfa_offset_sf(dwarf_loc_regs_t*);
-  bool cfa_val_offset(dwarf_loc_regs_t*);
-  bool cfa_val_offset_sf(dwarf_loc_regs_t*);
-  bool cfa_val_expression(dwarf_loc_regs_t*);
-  bool cfa_gnu_negative_offset_extended(dwarf_loc_regs_t*);
+  bool cfa_nop(DwarfLocations*);
+  bool cfa_set_loc(DwarfLocations*);
+  bool cfa_advance_loc(DwarfLocations*);
+  bool cfa_offset(DwarfLocations*);
+  bool cfa_restore(DwarfLocations*);
+  bool cfa_undefined(DwarfLocations*);
+  bool cfa_same_value(DwarfLocations*);
+  bool cfa_register(DwarfLocations*);
+  bool cfa_remember_state(DwarfLocations*);
+  bool cfa_restore_state(DwarfLocations*);
+  bool cfa_def_cfa(DwarfLocations*);
+  bool cfa_def_cfa_register(DwarfLocations*);
+  bool cfa_def_cfa_offset(DwarfLocations*);
+  bool cfa_def_cfa_expression(DwarfLocations*);
+  bool cfa_expression(DwarfLocations*);
+  bool cfa_offset_extended_sf(DwarfLocations*);
+  bool cfa_def_cfa_sf(DwarfLocations*);
+  bool cfa_def_cfa_offset_sf(DwarfLocations*);
+  bool cfa_val_offset(DwarfLocations*);
+  bool cfa_val_offset_sf(DwarfLocations*);
+  bool cfa_val_expression(DwarfLocations*);
+  bool cfa_gnu_negative_offset_extended(DwarfLocations*);
+  bool cfa_aarch64_negate_ra_state(DwarfLocations*);
 
-  using process_func = bool (DwarfCfa::*)(dwarf_loc_regs_t*);
+  using process_func = bool (DwarfCfa::*)(DwarfLocations*);
   constexpr static process_func kCallbackTable[64] = {
       // 0x00 DW_CFA_nop
       &DwarfCfa::cfa_nop,
@@ -215,8 +227,9 @@ class DwarfCfa {
       nullptr,
       // 0x2c illegal cfa
       nullptr,
-      // 0x2d DW_CFA_GNU_window_save (Treat this as illegal)
-      nullptr,
+      // 0x2d DW_CFA_AARCH64_negate_ra_state (aarch64 only)
+      // DW_CFA_GNU_window_save on other architectures.
+      &DwarfCfa::cfa_aarch64_negate_ra_state,
       // 0x2e DW_CFA_GNU_args_size
       &DwarfCfa::cfa_nop,
       // 0x2f DW_CFA_GNU_negative_offset_extended

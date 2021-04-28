@@ -14,13 +14,14 @@
  * limitations under the License.
  */
 
+#include <stdint.h>
+
 #include <vector>
 
 #include <gtest/gtest.h>
 
-#include <unwindstack/Memory.h>
-
 #include "LogFake.h"
+#include "MemoryBuffer.h"
 
 namespace unwindstack {
 
@@ -42,7 +43,7 @@ TEST_F(MemoryBufferTest, empty) {
 }
 
 TEST_F(MemoryBufferTest, write_read) {
-  memory_->Resize(256);
+  ASSERT_TRUE(memory_->Resize(256));
   ASSERT_EQ(256U, memory_->Size());
   ASSERT_TRUE(memory_->GetPtr(0) != nullptr);
   ASSERT_TRUE(memory_->GetPtr(1) != nullptr);
@@ -62,7 +63,7 @@ TEST_F(MemoryBufferTest, write_read) {
 }
 
 TEST_F(MemoryBufferTest, read_failures) {
-  memory_->Resize(100);
+  ASSERT_TRUE(memory_->Resize(100));
   std::vector<uint8_t> buffer(200);
   ASSERT_FALSE(memory_->ReadFully(0, buffer.data(), 101));
   ASSERT_FALSE(memory_->ReadFully(100, buffer.data(), 1));
@@ -72,14 +73,14 @@ TEST_F(MemoryBufferTest, read_failures) {
 }
 
 TEST_F(MemoryBufferTest, read_failure_overflow) {
-  memory_->Resize(100);
+  ASSERT_TRUE(memory_->Resize(100));
   std::vector<uint8_t> buffer(200);
 
   ASSERT_FALSE(memory_->ReadFully(UINT64_MAX - 100, buffer.data(), 200));
 }
 
 TEST_F(MemoryBufferTest, Read) {
-  memory_->Resize(256);
+  ASSERT_TRUE(memory_->Resize(256));
   ASSERT_EQ(256U, memory_->Size());
   ASSERT_TRUE(memory_->GetPtr(0) != nullptr);
   ASSERT_TRUE(memory_->GetPtr(1) != nullptr);
@@ -96,6 +97,14 @@ TEST_F(MemoryBufferTest, Read) {
   for (size_t i = 0; i < 128; i++) {
     ASSERT_EQ(128 + i, buffer[i]) << "Failed at byte " << i;
   }
+}
+
+TEST_F(MemoryBufferTest, Resize) {
+  ASSERT_TRUE(memory_->Resize(256));
+
+  ASSERT_TRUE(memory_->Resize(1024));
+
+  ASSERT_FALSE(memory_->Resize(SIZE_MAX));
 }
 
 }  // namespace unwindstack

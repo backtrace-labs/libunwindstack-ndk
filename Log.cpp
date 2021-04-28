@@ -21,8 +21,11 @@
 #include <string>
 
 #define LOG_TAG "unwind"
-#include <android-base/log_main.h>
+#include <log/log.h>
 
+#if defined(__BIONIC__)
+#include <async_safe/log.h>
+#endif
 #include <android-base/stringprintf.h>
 
 #include <unwindstack/Log.h>
@@ -53,5 +56,21 @@ void log(uint8_t indent, const char* format, ...) {
   }
   va_end(args);
 }
+
+#if defined(__BIONIC__)
+void log_async_safe(const char* format, ...) {
+  if (g_print_to_stdout) {
+    // Printing to stdout is never async safe, so throw the message away.
+    return;
+  }
+
+  va_list args;
+  va_start(args, format);
+  async_safe_format_log_va_list(ANDROID_LOG_ERROR, "libunwindstack", format, args);
+  va_end(args);
+}
+#else
+void log_async_safe(const char*, ...) {}
+#endif
 
 }  // namespace unwindstack

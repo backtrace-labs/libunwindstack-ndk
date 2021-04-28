@@ -19,48 +19,51 @@
 
 #include <stdint.h>
 
+#include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <dex/dex_file-inl.h>
+#include <unwindstack/SharedString.h>
+
+#include <art_api/dex_file_support.h>
 
 namespace unwindstack {
 
+struct MapInfo;
+class Memory;
+
 class DexFile {
+  struct Info {
+    uint32_t offset;  // Symbol start offset (relative to start of dex file).
+    SharedString name;
+  };
+
  public:
-  DexFile() = default;
-  virtual ~DexFile() = default;
+  bool IsValidPc(uint64_t dex_pc) {
+    return base_addr_ <= dex_pc && (dex_pc - base_addr_) < file_size_;
+  }
 
-  bool GetMethodInformation(uint64_t dex_offset, std::string* method_name, uint64_t* method_offset);
+  bool GetFunctionName(uint64_t dex_pc, SharedString* method_name, uint64_t* method_offset);
 
-  static DexFile* Create(uint64_t dex_file_offset_in_memory, Memory* memory, MapInfo* info);
-
- protected:
-  std::unique_ptr<const art::DexFile> dex_file_;
-};
-
-class DexFileFromFile : public DexFile {
- public:
-  DexFileFromFile() = default;
-  virtual ~DexFileFromFile();
-
-  bool Open(uint64_t dex_file_offset_in_file, const std::string& name);
+  static std::unique_ptr<DexFile> Create(uint64_t base_addr, uint64_t file_size, Memory* memory,
+                                         MapInfo* info);
 
  private:
-  void* mapped_memory_ = nullptr;
-  size_t size_ = 0;
-};
+  DexFile(std::unique_ptr<Memory>&& memory, uint64_t base_addr, uint64_t file_size,
+          std::unique_ptr<art_api::dex::DexFile>&& dex)
+      : memory_(std::move(memory)),
+        base_addr_(base_addr),
+        file_size_(file_size),
+        dex_(std::move(dex)) {}
 
-class DexFileFromMemory : public DexFile {
- public:
-  DexFileFromMemory() = default;
-  virtual ~DexFileFromMemory() = default;
+  std::unique_ptr<Memory> memory_;  // Memory range containing the dex file.
+  uint64_t base_addr_ = 0;          // Absolute address where this DEX file is in memory.
+  uint64_t file_size_ = 0;          // Total number of bytes in the dex file.
+  std::unique_ptr<art_api::dex::DexFile> dex_;  // Loaded underling dex object.
 
-  bool Open(uint64_t dex_file_offset_in_memory, Memory* memory);
-
- private:
-  std::vector<uint8_t> memory_;
+  std::map<uint32_t, Info> symbols_;  // Cache of read symbols (keyed by *end* offset).
 };
 
 }  // namespace unwindstack

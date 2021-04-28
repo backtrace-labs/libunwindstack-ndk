@@ -23,6 +23,7 @@
 #include <unwindstack/ElfInterface.h>
 #include <unwindstack/Memory.h>
 #include <unwindstack/Regs.h>
+#include <unwindstack/SharedString.h>
 
 #include "ElfFake.h"
 #include "RegsFake.h"
@@ -32,14 +33,14 @@ namespace unwindstack {
 std::deque<FunctionData> ElfInterfaceFake::functions_;
 std::deque<StepData> ElfInterfaceFake::steps_;
 
-bool ElfInterfaceFake::GetFunctionName(uint64_t, uint64_t, std::string* name, uint64_t* offset) {
+bool ElfInterfaceFake::GetFunctionName(uint64_t, SharedString* name, uint64_t* offset) {
   if (functions_.empty()) {
     return false;
   }
-  auto entry = functions_.front();
-  functions_.pop_front();
-  *name = entry.name;
+  auto& entry = functions_.front();
+  *name = SharedString(std::move(entry.name));
   *offset = entry.offset;
+  functions_.pop_front();
   return true;
 }
 
@@ -52,7 +53,7 @@ bool ElfInterfaceFake::GetGlobalVariable(const std::string& global, uint64_t* of
   return true;
 }
 
-bool ElfInterfaceFake::Step(uint64_t, uint64_t, Regs* regs, Memory*, bool* finished) {
+bool ElfInterfaceFake::Step(uint64_t, Regs* regs, Memory*, bool* finished, bool* is_signal_frame) {
   if (steps_.empty()) {
     return false;
   }
@@ -68,6 +69,7 @@ bool ElfInterfaceFake::Step(uint64_t, uint64_t, Regs* regs, Memory*, bool* finis
   fake_regs->set_pc(entry.pc);
   fake_regs->set_sp(entry.sp);
   *finished = entry.finished;
+  *is_signal_frame = false;
   return true;
 }
 

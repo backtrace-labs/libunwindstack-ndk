@@ -33,6 +33,7 @@ enum DwarfLocationEnum : uint8_t {
   DWARF_LOCATION_REGISTER,
   DWARF_LOCATION_EXPRESSION,
   DWARF_LOCATION_VAL_EXPRESSION,
+  DWARF_LOCATION_PSEUDO_REGISTER,
 };
 
 struct DwarfLocation {
@@ -46,7 +47,6 @@ struct DwarfLocations : public std::unordered_map<uint32_t, DwarfLocation> {
   uint64_t pc_start = 0;
   uint64_t pc_end = 0;
 };
-typedef DwarfLocations dwarf_loc_regs_t;
 
 }  // namespace unwindstack
 

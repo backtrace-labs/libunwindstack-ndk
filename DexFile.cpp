@@ -22,164 +22,91 @@
 
 #include <memory>
 
-#include <android-base/unique_fd.h>
+#define LOG_TAG "unwind"
+#include <log/log.h>
 
-#include <dex/code_item_accessors-inl.h>
-#include <dex/compact_dex_file.h>
-#include <dex/dex_file-inl.h>
-#include <dex/dex_file_loader.h>
-#include <dex/standard_dex_file.h>
+#include <android-base/unique_fd.h>
+#include <art_api/dex_file_support.h>
 
 #include <unwindstack/MapInfo.h>
 #include <unwindstack/Memory.h>
 
 #include "DexFile.h"
+#include "MemoryBuffer.h"
 
 namespace unwindstack {
 
-DexFile* DexFile::Create(uint64_t dex_file_offset_in_memory, Memory* memory, MapInfo* info) {
-  if (!info->name.empty()) {
-    std::unique_ptr<DexFileFromFile> dex_file(new DexFileFromFile);
-    if (dex_file->Open(dex_file_offset_in_memory - info->start + info->offset, info->name)) {
-      return dex_file.release();
+static bool CheckDexSupport() {
+  if (std::string err_msg; !art_api::dex::TryLoadLibdexfile(&err_msg)) {
+    ALOGW("Failed to initialize DEX file support: %s", err_msg.c_str());
+    return false;
+  }
+  return true;
+}
+
+std::unique_ptr<DexFile> DexFile::Create(uint64_t base_addr, uint64_t file_size, Memory* memory,
+                                         MapInfo* info) {
+  static bool has_dex_support = CheckDexSupport();
+  if (!has_dex_support || file_size == 0) {
+    return nullptr;
+  }
+
+  // Try to map the file directly from disk.
+  std::unique_ptr<Memory> dex_memory;
+  if (info != nullptr && !info->name.empty()) {
+    if (info->start <= base_addr && base_addr < info->end) {
+      uint64_t offset_in_file = (base_addr - info->start) + info->offset;
+      if (file_size <= info->end - base_addr) {
+        dex_memory = Memory::CreateFileMemory(info->name, offset_in_file, file_size);
+        // On error, the results is null and we fall through to the fallback code-path.
+      }
     }
   }
 
-  std::unique_ptr<DexFileFromMemory> dex_file(new DexFileFromMemory);
-  if (dex_file->Open(dex_file_offset_in_memory, memory)) {
-    return dex_file.release();
+  // Fallback: make copy in local buffer.
+  if (dex_memory.get() == nullptr) {
+    std::unique_ptr<MemoryBuffer> copy(new MemoryBuffer);
+    if (!copy->Resize(file_size)) {
+      return nullptr;
+    }
+    if (!memory->ReadFully(base_addr, copy->GetPtr(0), file_size)) {
+      return nullptr;
+    }
+    dex_memory = std::move(copy);
+  }
+
+  const char* location = info != nullptr ? info->name.c_str() : "";
+  std::unique_ptr<art_api::dex::DexFile> dex;
+  art_api::dex::DexFile::Create(dex_memory->GetPtr(), file_size, nullptr, location, &dex);
+  if (dex != nullptr) {
+    return std::unique_ptr<DexFile>(
+        new DexFile(std::move(dex_memory), base_addr, file_size, std::move(dex)));
   }
   return nullptr;
 }
 
-DexFileFromFile::~DexFileFromFile() {
-  if (size_ != 0) {
-    munmap(mapped_memory_, size_);
-  }
-}
+bool DexFile::GetFunctionName(uint64_t dex_pc, SharedString* method_name, uint64_t* method_offset) {
+  uint64_t dex_offset = dex_pc - base_addr_;  // Convert absolute PC to file-relative offset.
 
-bool DexFile::GetMethodInformation(uint64_t dex_offset, std::string* method_name,
-                                   uint64_t* method_offset) {
-  if (dex_file_ == nullptr) {
-    return false;
-  }
-
-  if (!dex_file_->IsInDataSection(dex_file_->Begin() + dex_offset)) {
-    return false;  // The DEX offset is not within the bytecode of this dex file.
-  }
-
-  for (uint32_t i = 0; i < dex_file_->NumClassDefs(); ++i) {
-    const art::DexFile::ClassDef& class_def = dex_file_->GetClassDef(i);
-    const uint8_t* class_data = dex_file_->GetClassData(class_def);
-    if (class_data == nullptr) {
-      continue;
-    }
-    for (art::ClassDataItemIterator it(*dex_file_.get(), class_data); it.HasNext(); it.Next()) {
-      if (!it.IsAtMethod()) {
-        continue;
-      }
-      const art::DexFile::CodeItem* code_item = it.GetMethodCodeItem();
-      if (code_item == nullptr) {
-        continue;
-      }
-      art::CodeItemInstructionAccessor code(*dex_file_.get(), code_item);
-      if (!code.HasCodeItem()) {
-        continue;
-      }
-
-      uint64_t offset = reinterpret_cast<const uint8_t*>(code.Insns()) - dex_file_->Begin();
-      size_t size = code.InsnsSizeInCodeUnits() * sizeof(uint16_t);
-      if (offset <= dex_offset && dex_offset < offset + size) {
-        *method_name = dex_file_->PrettyMethod(it.GetMemberIndex(), false);
-        *method_offset = dex_offset - offset;
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-bool DexFileFromFile::Open(uint64_t dex_file_offset_in_file, const std::string& file) {
-  android::base::unique_fd fd(TEMP_FAILURE_RETRY(open(file.c_str(), O_RDONLY | O_CLOEXEC)));
-  if (fd == -1) {
-    return false;
-  }
-  struct stat buf;
-  if (fstat(fd, &buf) == -1) {
-    return false;
-  }
-  uint64_t length;
-  if (buf.st_size < 0 ||
-      __builtin_add_overflow(dex_file_offset_in_file, sizeof(art::DexFile::Header), &length) ||
-      static_cast<uint64_t>(buf.st_size) < length) {
-    return false;
-  }
-
-  mapped_memory_ = mmap(nullptr, buf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-  if (mapped_memory_ == MAP_FAILED) {
-    return false;
-  }
-  size_ = buf.st_size;
-
-  uint8_t* memory = reinterpret_cast<uint8_t*>(mapped_memory_);
-
-  art::DexFile::Header* header =
-      reinterpret_cast<art::DexFile::Header*>(&memory[dex_file_offset_in_file]);
-  if (!art::StandardDexFile::IsMagicValid(header->magic_) &&
-      !art::CompactDexFile::IsMagicValid(header->magic_)) {
-    return false;
-  }
-
-  if (__builtin_add_overflow(dex_file_offset_in_file, header->file_size_, &length) ||
-      static_cast<uint64_t>(buf.st_size) < length) {
-    return false;
-  }
-
-  art::DexFileLoader loader;
-  std::string error_msg;
-  auto dex = loader.Open(&memory[dex_file_offset_in_file], header->file_size_, "", 0, nullptr,
-                         false, false, &error_msg);
-  dex_file_.reset(dex.release());
-  return dex_file_ != nullptr;
-}
-
-bool DexFileFromMemory::Open(uint64_t dex_file_offset_in_memory, Memory* memory) {
-  memory_.resize(sizeof(art::DexFile::Header));
-  if (!memory->ReadFully(dex_file_offset_in_memory, memory_.data(), memory_.size())) {
-    return false;
-  }
-
-  art::DexFile::Header* header = reinterpret_cast<art::DexFile::Header*>(memory_.data());
-  uint32_t file_size = header->file_size_;
-  if (art::CompactDexFile::IsMagicValid(header->magic_)) {
-    // Compact dex file store data section separately so that it can be shared.
-    // Therefore we need to extend the read memory range to include it.
-    // TODO: This might be wasteful as we might read data in between as well.
-    //       In practice, this should be fine, as such sharing only happens on disk.
-    uint32_t computed_file_size;
-    if (__builtin_add_overflow(header->data_off_, header->data_size_, &computed_file_size)) {
+  // Lookup the function in the cache.
+  auto it = symbols_.upper_bound(dex_offset);
+  if (it == symbols_.end() || dex_offset < it->second.offset) {
+    // Lookup the function in the underlying dex file.
+    size_t found = dex_->FindMethodAtOffset(dex_offset, [&](const auto& method) {
+      size_t code_size, name_size;
+      uint32_t offset = method.GetCodeOffset(&code_size);
+      const char* name = method.GetQualifiedName(/*with_params=*/false, &name_size);
+      it = symbols_.emplace(offset + code_size, Info{offset, std::string(name, name_size)}).first;
+    });
+    if (found == 0) {
       return false;
     }
-    if (computed_file_size > file_size) {
-      file_size = computed_file_size;
-    }
-  } else if (!art::StandardDexFile::IsMagicValid(header->magic_)) {
-    return false;
   }
 
-  memory_.resize(file_size);
-  if (!memory->ReadFully(dex_file_offset_in_memory, memory_.data(), memory_.size())) {
-    return false;
-  }
-
-  header = reinterpret_cast<art::DexFile::Header*>(memory_.data());
-
-  art::DexFileLoader loader;
-  std::string error_msg;
-  auto dex =
-      loader.Open(memory_.data(), header->file_size_, "", 0, nullptr, false, false, &error_msg);
-  dex_file_.reset(dex.release());
-  return dex_file_ != nullptr;
+  // Return the found function.
+  *method_offset = dex_offset - it->second.offset;
+  *method_name = it->second.name;
+  return true;
 }
 
 }  // namespace unwindstack

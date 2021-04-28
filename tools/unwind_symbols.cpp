@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include <linux/elf.h>
+#include <elf.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -59,20 +59,14 @@ int main(int argc, char** argv) {
   // Send all log messages to stdout.
   unwindstack::log_to_stdout(true);
 
-  unwindstack::MemoryFileAtOffset* memory = new unwindstack::MemoryFileAtOffset;
-  if (!memory->Init(argv[1], 0)) {
-    printf("Failed to init\n");
-    return 1;
-  }
-
-  unwindstack::Elf elf(memory);
-  if (!elf.Init(true) || !elf.valid()) {
+  unwindstack::Elf elf(unwindstack::Memory::CreateFileMemory(argv[1], 0).release());
+  if (!elf.Init() || !elf.valid()) {
     printf("%s is not a valid elf file.\n", argv[1]);
     return 1;
   }
 
-  std::string soname;
-  if (elf.GetSoname(&soname)) {
+  std::string soname(elf.GetSoname());
+  if (!soname.empty()) {
     printf("Soname: %s\n\n", soname.c_str());
   }
 
@@ -95,9 +89,8 @@ int main(int argc, char** argv) {
   }
 
   std::string name;
-  uint64_t load_bias = elf.GetLoadBias();
   if (argc == 3) {
-    std::string cur_name;
+    unwindstack::SharedString cur_name;
     uint64_t func_offset;
     if (!elf.GetFunctionName(func_addr, &cur_name, &func_offset)) {
       printf("No known function at 0x%" PRIx64 "\n", func_addr);
@@ -113,10 +106,10 @@ int main(int argc, char** argv) {
 
   // This is a crude way to get the symbols in order.
   for (const auto& entry : elf.interface()->pt_loads()) {
-    uint64_t start = entry.second.offset + load_bias;
-    uint64_t end = entry.second.table_size + load_bias;
+    uint64_t start = entry.second.offset;
+    uint64_t end = entry.second.table_size;
     for (uint64_t addr = start; addr < end; addr += 4) {
-      std::string cur_name;
+      unwindstack::SharedString cur_name;
       uint64_t func_offset;
       if (elf.GetFunctionName(addr, &cur_name, &func_offset)) {
         if (cur_name != name) {
