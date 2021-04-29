@@ -35,6 +35,7 @@ class SharedString {
   bool is_null() const { return data_.get() == nullptr; }
   bool empty() const { return is_null() ? true : data_->empty(); }
   const char* c_str() const { return is_null() ? "" : data_->c_str(); }
+  const size_t size() const { return is_null() ? 0 : data_->size(); }
 
   operator const std::string&() const {
     [[clang::no_destroy]] static const std::string empty;

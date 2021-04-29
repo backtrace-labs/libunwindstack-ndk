@@ -17,10 +17,6 @@
 #include <sys/ptrace.h>
 #include <sys/uio.h>
 
-#ifdef __BIONIC__
-#include <bionic/mte.h>
-#endif
-
 #include "MemoryLocal.h"
 #include "MemoryRemote.h"
 

@@ -37,6 +37,7 @@
 #include <unwindstack/Unwinder.h>
 
 #include "Check.h"
+#include <libgen.h>
 
 // Use the demangler from libc++.
 extern "C" char* __cxa_demangle(const char*, char*, size_t*, int* status);

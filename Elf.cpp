@@ -23,7 +23,7 @@
 #include <utility>
 
 #define LOG_TAG "unwind"
-#include <log/log.h>
+#include <android-base/log_main.h>
 
 #include <unwindstack/Elf.h>
 #include <unwindstack/ElfInterface.h>

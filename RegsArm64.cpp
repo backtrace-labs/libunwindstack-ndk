@@ -19,10 +19,6 @@
 
 #include <functional>
 
-#if defined(__BIONIC__)
-#include <bionic/pac.h>
-#endif
-
 #include <unwindstack/Elf.h>
 #include <unwindstack/MachineArm64.h>
 #include <unwindstack/MapInfo.h>
@@ -60,10 +56,6 @@ void RegsArm64::set_pc(uint64_t pc) {
   if ((0 != pc) && IsRASigned()) {
     if (pac_mask_) {
       pc &= ~pac_mask_;
-    } else {
-#if defined(__BIONIC__)
-      pc = __bionic_clear_pac_bits(pc);
-#endif
     }
   }
   regs_[ARM64_REG_PC] = pc;

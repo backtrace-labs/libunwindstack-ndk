@@ -21,10 +21,6 @@
 #include <string>
 #include <utility>
 
-#include <7zCrc.h>
-#include <Xz.h>
-#include <XzCrc64.h>
-
 #include <unwindstack/DwarfError.h>
 #include <unwindstack/DwarfSection.h>
 #include <unwindstack/ElfInterface.h>
@@ -35,7 +31,6 @@
 #include "DwarfEhFrame.h"
 #include "DwarfEhFrameWithHdr.h"
 #include "MemoryBuffer.h"
-#include "MemoryXz.h"
 #include "Symbols.h"
 
 namespace unwindstack {
@@ -80,18 +75,7 @@ bool ElfInterface::GetTextRange(uint64_t* addr, uint64_t* size) {
 }
 
 std::unique_ptr<Memory> ElfInterface::CreateGnuDebugdataMemory() {
-  if (gnu_debugdata_offset_ == 0 || gnu_debugdata_size_ == 0) {
-    return nullptr;
-  }
-
-  auto decompressed =
-      std::make_unique<MemoryXz>(memory_, gnu_debugdata_offset_, gnu_debugdata_size_, GetSoname());
-  if (!decompressed || !decompressed->Init()) {
-    gnu_debugdata_offset_ = 0;
-    gnu_debugdata_size_ = 0;
-    return nullptr;
-  }
-  return decompressed;
+  return nullptr;
 }
 
 template <typename ElfTypes>
