@@ -345,7 +345,13 @@ size_t MemoryRemote::Read(uint64_t addr, void* dst, size_t size) {
 }
 
 size_t MemoryLocal::Read(uint64_t addr, void* dst, size_t size) {
-  return ProcessVmRead(getpid(), addr, dst, size);
+  // Prefer process_vm_read, try it first. If it doesn't work, use direct memory read.
+  size_t result = ProcessVmRead(getpid(), addr, dst, size);
+  if (!result && size) {
+    memcpy(dst, (void *)addr, size);
+    result = size;
+  }
+  return result;
 }
 
 MemoryRange::MemoryRange(const std::shared_ptr<Memory>& memory, uint64_t begin, uint64_t length,
