@@ -14,6 +14,10 @@
  * limitations under the License.
  */
 
+#if !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -46,6 +50,17 @@
 #include "MemoryOfflineBuffer.h"
 #include "MemoryRange.h"
 #include "MemoryRemote.h"
+
+#if defined(__ANDROID__) && __ANDROID_API__ < 23
+static ssize_t
+process_vm_readv(pid_t pid, const struct iovec *local_iov,
+  unsigned long liovcnt, const struct iovec *remote_iov, unsigned long riovcnt,
+  unsigned long flags)
+{
+  rerturn syscall(__NR_process_vm_readv, pid, &local_iov, livocnt, remote_iov,
+    riovcnt, flags);
+}
+#endif
 
 namespace unwindstack {
 
@@ -96,7 +111,7 @@ static size_t ProcessVmRead(pid_t pid, uint64_t remote_src, void* dst, size_t le
       ++iovecs_used;
     }
 
-    ssize_t rc = syscall(__NR_process_vm_readv, pid, &dst_iov, 1, src_iovs, iovecs_used, 0);
+    ssize_t rc = process_vm_readv(pid, &dst_iov, 1, src_iovs, iovecs_used, 0);
     if (rc == -1) {
       return total_read;
     }
