@@ -64,6 +64,9 @@ class Elf {
   bool Step(uint64_t rel_pc, Regs* regs, Memory* process_memory, bool* finished,
             bool* is_signal_frame);
 
+  bool Step(uint64_t rel_pc, uint64_t adjusted_rel_pc, uint64_t elf_offset, Regs* regs,
+            Memory* process_memory, bool* finished);
+
   ElfInterface* CreateInterfaceFromMemory(Memory* memory);
 
   std::string GetBuildID();

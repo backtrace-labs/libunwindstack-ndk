@@ -88,6 +88,9 @@ class ElfInterface {
   virtual bool Step(uint64_t rel_pc, Regs* regs, Memory* process_memory, bool* finished,
                     bool* is_signal_frame);
 
+  virtual bool Step(uint64_t rel_pc, uint64_t load_bias, Regs* regs, Memory* process_memory,
+                    bool* finished);
+
   virtual bool IsValidPc(uint64_t pc);
 
   bool GetTextRange(uint64_t* addr, uint64_t* size);

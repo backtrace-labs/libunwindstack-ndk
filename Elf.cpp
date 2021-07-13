@@ -202,6 +202,24 @@ bool Elf::Step(uint64_t rel_pc, Regs* regs, Memory* process_memory, bool* finish
   return interface_->Step(rel_pc, regs, process_memory, finished, is_signal_frame);
 }
 
+// The relative pc is always relative to the start of the map from which it comes.
+bool Elf::Step(uint64_t rel_pc, uint64_t adjusted_rel_pc, uint64_t elf_offset, Regs* regs,
+               Memory* process_memory, bool* finished) {
+  if (!valid_) {
+    return false;
+  }
+
+  // The relative pc expectd by StepIfSignalHandler is relative to the start of the elf.
+  if (regs->StepIfSignalHandler(rel_pc + elf_offset, this, process_memory)) {
+    *finished = false;
+    return true;
+  }
+
+  // Lock during the step which can update information in the object.
+  std::lock_guard<std::mutex> guard(lock_);
+  return interface_->Step(adjusted_rel_pc, load_bias_, regs, process_memory, finished);
+}
+
 bool Elf::IsValidElf(Memory* memory) {
   if (memory == nullptr) {
     return false;

@@ -500,6 +500,81 @@ bool ElfInterface::Step(uint64_t pc, Regs* regs, Memory* process_memory, bool* f
   return false;
 }
 
+bool ElfInterface::Step(uint64_t pc, uint64_t load_bias, Regs* regs, Memory* process_memory,
+                        bool* finished) {
+  bool is_signal_frame;
+  last_error_.code = ERROR_NONE;
+  last_error_.address = 0;
+
+  // Adjust the load bias to get the real relative pc.
+  if (pc < load_bias) {
+    last_error_.code = ERROR_UNWIND_INFO;
+    return false;
+  }
+  uint64_t adjusted_pc = pc - load_bias;
+
+  // Try the debug_frame first since it contains the most specific unwind
+  // information.
+  DwarfSection* debug_frame = debug_frame_.get();
+  if (debug_frame != nullptr && debug_frame->Step(adjusted_pc, regs, process_memory, finished, &is_signal_frame)) {
+    return true;
+  }
+
+  // Try the eh_frame next.
+  DwarfSection* eh_frame = eh_frame_.get();
+  if (eh_frame != nullptr && eh_frame->Step(adjusted_pc, regs, process_memory, finished, &is_signal_frame)) {
+    return true;
+  }
+
+  // Finally try the gnu_debugdata interface, but always use a zero load bias.
+  if (gnu_debugdata_interface_ != nullptr &&
+      gnu_debugdata_interface_->Step(pc, 0, regs, process_memory, finished)) {
+    return true;
+  }
+
+  // Set the error code based on the first error encountered.
+  DwarfSection* section = nullptr;
+  if (debug_frame_ != nullptr) {
+    section = debug_frame_.get();
+  } else if (eh_frame_ != nullptr) {
+    section = eh_frame_.get();
+  } else if (gnu_debugdata_interface_ != nullptr) {
+    last_error_ = gnu_debugdata_interface_->last_error();
+    return false;
+  } else {
+    return false;
+  }
+
+  // Convert the DWARF ERROR to an external error.
+  DwarfErrorCode code = section->LastErrorCode();
+  switch (code) {
+    case DWARF_ERROR_NONE:
+      last_error_.code = ERROR_NONE;
+      break;
+
+    case DWARF_ERROR_MEMORY_INVALID:
+      last_error_.code = ERROR_MEMORY_INVALID;
+      last_error_.address = section->LastErrorAddress();
+      break;
+
+    case DWARF_ERROR_ILLEGAL_VALUE:
+    case DWARF_ERROR_ILLEGAL_STATE:
+    case DWARF_ERROR_STACK_INDEX_NOT_VALID:
+    case DWARF_ERROR_TOO_MANY_ITERATIONS:
+    case DWARF_ERROR_CFA_NOT_DEFINED:
+    case DWARF_ERROR_NO_FDES:
+      last_error_.code = ERROR_UNWIND_INFO;
+      break;
+
+    case DWARF_ERROR_NOT_IMPLEMENTED:
+    case DWARF_ERROR_UNSUPPORTED_VERSION:
+      last_error_.code = ERROR_UNSUPPORTED;
+      break;
+  }
+  return false;
+}
+
+
 // This is an estimation of the size of the elf file using the location
 // of the section headers and size. This assumes that the section headers
 // are at the end of the elf file. If the elf has a load bias, the size
