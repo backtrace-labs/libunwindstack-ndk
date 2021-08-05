@@ -116,7 +116,7 @@ FrameData* Unwinder::FillInFrame(MapInfo* map_info, Elf* elf, uint64_t rel_pc,
       std::string soname = elf->GetSoname();
       if (!soname.empty()) {
         std::string map_with_soname;
-        map_with_soname += frame->map_name;
+        map_with_soname += static_cast<const std::string&>(frame->map_name);
         map_with_soname += '!';
         map_with_soname += soname;
         frame->map_name = SharedString(std::move(map_with_soname));
@@ -334,7 +334,7 @@ std::string Unwinder::FormatFrame(const FrameData& frame) const {
     data += "  <unknown>";
   } else if (!frame.map_name.empty()) {
     data += "  ";
-    data += frame.map_name;
+    data += static_cast<const std::string&>(frame.map_name);
   } else {
     data += android::base::StringPrintf("  <anonymous:%" PRIx64 ">", frame.map_start);
   }
@@ -347,7 +347,7 @@ std::string Unwinder::FormatFrame(const FrameData& frame) const {
     char* demangled_name = __cxa_demangle(frame.function_name.c_str(), nullptr, nullptr, nullptr);
     if (demangled_name == nullptr) {
       data += " (";
-      data += frame.function_name;
+      data += static_cast<const std::string&>(frame.function_name);
     } else {
       data += " (";
       data += demangled_name;

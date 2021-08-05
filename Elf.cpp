@@ -401,7 +401,7 @@ void Elf::CacheAdd(MapInfo* info) {
   if (info->offset != 0) {
     // The second element in the pair indicates whether elf_offset should
     // be set to offset when getting out of the cache.
-    std::string key = std::string(info->name) + ':' + std::to_string(info->offset);
+    std::string key = std::string(static_cast<const std::string&>(info->name)) + ':' + std::to_string(info->offset);
     (*cache_)[key] = std::make_pair(info->elf, info->elf_offset != 0);
   }
 }
@@ -420,13 +420,13 @@ bool Elf::CacheAfterCreateMemory(MapInfo* info) {
   // been cached. Add an entry at name:offset to get this directly out
   // of the cache next time.
   info->elf = entry->second.first;
-  std::string key = std::string(info->name) + ':' + std::to_string(info->offset);
+  std::string key = std::string(static_cast<const std::string&>(info->name)) + ':' + std::to_string(info->offset);
   (*cache_)[key] = std::make_pair(info->elf, true);
   return true;
 }
 
 bool Elf::CacheGet(MapInfo* info) {
-  std::string name(info->name);
+  std::string name(static_cast<const std::string&>(info->name));
   if (info->offset != 0) {
     name += ':' + std::to_string(info->offset);
   }
